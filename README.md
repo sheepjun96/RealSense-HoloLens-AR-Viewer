@@ -8,6 +8,9 @@ Intel RealSense 뎁스 카메라와 연동하여 도출된 ICP(Iterative Closest
 * **RESTful API 통신**: UnityWebRequest를 활용한 비동기(Coroutine) 네트워크 통신으로 백엔드 API(FastAPI)와 연동하여 정합 프로세스를 제어합니다.
 * **MRTK 기반 직관적 UI**: Mixed Reality Toolkit(MRTK)을 활용하여 사용자가 시야 내에서 정합을 트리거하고, 모델의 투명도 등을 제어할 수 있는 슬라이더 UI를 제공합니다.
 
+## 🔄 System Architecture
+[RealSense D435f] ──(Point Cloud)──> [FastAPI Server (ICP)] ──(4x4 Trans Matrix)──> [HoloLens 1st Gen]
+
 ## 🛠 Tech Stack
 **Hardware**
 * Microsoft HoloLens 1세대
@@ -31,3 +34,17 @@ Intel RealSense 뎁스 카메라와 연동하여 도출된 ICP(Iterative Closest
 1. **Clone the repository**
    ```bash
    git clone [https://github.com/sheepjun96/RealSense-HoloLens-AR-Viewer.git](https://github.com/sheepjun96/RealSense-HoloLens-AR-Viewer.git)
+   ```
+
+2. **Open in Unity**
+- Unity Hub를 실행하고 ADD 버튼을 눌러 클론한 프로젝트 폴더를 엽니다.
+- Assets/Scenes 폴더 내의 메인 씬(SampleScene)을 엽니다.
+
+3. **Configure API Endpoint**
+- RegistrationManager 스크립트가 부착된 게임 오브젝트를 선택합니다.
+- Inspector 창에서 백엔드 서버의 URL(IP 및 포트)을 로컬 환경에 맞게 수정합니다.
+
+4. **Build and Deploy**
+- File > Build Settings에서 Platform을 Universal Windows Platform으로 설정합니다.
+- Target Device를 HoloLens로 설정 후 Build를 진행합니다.
+- 생성된 .sln 파일을 Visual Studio로 열어 HoloLens 기기에 Deploy 합니다.
