@@ -1,0 +1,207 @@
+﻿using System.Collections;
+using System.Text;
+using UnityEngine;
+using UnityEngine.Networking;
+using Newtonsoft.Json;
+using TMPro;
+
+public class RegistrationManager : MonoBehaviour
+{
+    private string apiUrl = "http://172.20.10.2:55555/hololens/capture-register";
+
+    public Transform targetMeshAnchor;
+    public GameObject loadingUI;
+    public TextMeshPro loadingText;
+    public PatientModelLoader patientModelLoader;
+
+    private Vector3 captureCameraPosition;
+    private Quaternion captureCameraRotation;
+
+    [Header("Manual offset in HoloLens camera coordinates (meters)")]
+    public float offsetX = 0f;
+    public float offsetY = 0.08f;
+    public float offsetZ = 0.02f;
+
+    private bool isRegistering;
+
+    private void Awake()
+    {
+        if (patientModelLoader == null)
+            patientModelLoader = FindObjectOfType<PatientModelLoader>();
+    }
+
+    public void StartRegistrationProcess()
+    {
+        if (isRegistering) return;
+        if (targetMeshAnchor == null || Camera.main == null)
+        {
+            Debug.LogError("RegistrationManager: targetMeshAnchor 또는 Main Camera가 없습니다.");
+            ShowErrorFeedback("Setup Error");
+            return;
+        }
+        if (patientModelLoader == null)
+        {
+            Debug.LogError("RegistrationManager: PatientModelLoader 연결이 없습니다.");
+            ShowErrorFeedback("Model Setup Error");
+            return;
+        }
+        if (string.IsNullOrEmpty(patientModelLoader.CurrentPatientId))
+        {
+            ShowErrorFeedback(string.IsNullOrEmpty(patientModelLoader.LastError)
+                ? "Loading Model" : "Model Error");
+            return;
+        }
+
+        isRegistering = true;
+        Debug.Log("정합 프로세스 시작...");
+        if (loadingUI != null)
+        {
+            loadingUI.SetActive(true);
+            if (loadingText != null) loadingText.text = "Loading...";
+        }
+
+        captureCameraPosition = Camera.main.transform.position;
+        captureCameraRotation = Camera.main.transform.rotation;
+
+        StartCoroutine(SendRegistrationRequest());
+    }
+
+    private IEnumerator SendRegistrationRequest()
+    {
+        string jsonData = "{}";
+
+        using (UnityWebRequest request = new UnityWebRequest(apiUrl, "POST"))
+        {
+            byte[] bodyRaw = Encoding.UTF8.GetBytes(jsonData);
+            request.uploadHandler = new UploadHandlerRaw(bodyRaw);
+            request.downloadHandler = new DownloadHandlerBuffer();
+            request.SetRequestHeader("Content-Type", "application/json");
+
+            yield return request.SendWebRequest();
+
+            if (request.isNetworkError)
+            {
+                Debug.LogError("네트워크 에러: " + request.error);
+                ShowErrorFeedback("Network Error");
+            }
+            else if (request.isHttpError)
+            {
+                Debug.LogError("API 에러: " + request.error);
+                ShowErrorFeedback("Try Again");
+            }
+            else
+            {
+                string responseText = request.downloadHandler.text;
+                RegistrationResponse response = null;
+                try { response = JsonConvert.DeserializeObject<RegistrationResponse>(responseText); }
+                catch (System.Exception error) { Debug.LogError("API JSON 해석 실패: " + error); }
+
+                if (response != null && (response.status == "completed" || response.status == "available"))
+                {
+                    if (patientModelLoader != null && response.patient_id != patientModelLoader.CurrentPatientId)
+                    {
+                        Debug.LogError("정합 환자와 표시 모델이 다릅니다: " + response.patient_id + " / " + patientModelLoader.CurrentPatientId);
+                        ShowErrorFeedback("Patient Changed");
+                    }
+                    else if (response.unit != "meter" && response.unit != "millimeter")
+                    {
+                        Debug.LogError("알 수 없는 행렬 단위: " + response.unit);
+                        ShowErrorFeedback("Unit Error");
+                    }
+                    else if (IsValidMatrix(response.source_from_target_m))
+                    {
+                        Debug.Log("source_from_target_m translation (" + response.unit + "): " +
+                            response.source_from_target_m[0][3] + ", " +
+                            response.source_from_target_m[1][3] + ", " +
+                            response.source_from_target_m[2][3]);
+                        if (IsValidMatrix(response.source_from_target_mm))
+                            Debug.Log("source_from_target_mm translation: " +
+                                response.source_from_target_mm[0][3] + ", " +
+                                response.source_from_target_mm[1][3] + ", " +
+                                response.source_from_target_mm[2][3]);
+                        ApplyMatrix(response.source_from_target_m, response.unit == "meter");
+                        if (loadingUI != null) loadingUI.SetActive(false);
+                    }
+                    else
+                    {
+                        Debug.LogError("source_from_target_m이 유효한 4x4 행렬이 아닙니다.");
+                        ShowErrorFeedback("Matrix Error");
+                    }
+                }
+                else ShowErrorFeedback("Try Again");
+            }
+        }
+        isRegistering = false;
+    }
+
+    private static bool IsValidMatrix(float[][] matrix)
+    {
+        if (matrix == null || matrix.Length != 4) return false;
+        for (int row = 0; row < 4; row++)
+        {
+            if (matrix[row] == null || matrix[row].Length != 4) return false;
+            for (int col = 0; col < 4; col++)
+                if (float.IsNaN(matrix[row][col]) || float.IsInfinity(matrix[row][col])) return false;
+        }
+        return true;
+    }
+
+    private void ShowErrorFeedback(string message)
+    {
+        if (loadingUI != null && loadingText != null)
+        {
+            loadingUI.SetActive(true);
+            loadingText.text = message;
+            StartCoroutine(HideUIAfterSeconds(3f));
+        }
+    }
+
+    private IEnumerator HideUIAfterSeconds(float seconds)
+    {
+        yield return new WaitForSeconds(seconds);
+        if (loadingUI != null) loadingUI.SetActive(false);
+    }
+
+    private void ApplyMatrix(float[][] M, bool isAlreadyMeters)
+    {
+        float tx = M[0][3];
+        float ty = M[1][3];
+        float tz = M[2][3];
+
+        if (!isAlreadyMeters)
+        {
+            tx /= 1000f;
+            ty /= 1000f;
+            tz /= 1000f;
+        }
+
+        Vector3 localPosition = new Vector3(tx + offsetX, -ty + offsetY, tz + offsetZ);
+
+        Matrix4x4 unityMatrix = new Matrix4x4();
+        unityMatrix.SetRow(0, new Vector4(-M[0][0],  M[0][1],  M[0][2],  0));
+        unityMatrix.SetRow(1, new Vector4( M[1][0], -M[1][1], -M[1][2],  0));
+        unityMatrix.SetRow(2, new Vector4(-M[2][0],  M[2][1],  M[2][2],  0));
+        unityMatrix.SetRow(3, new Vector4(       0,        0,        0,  1));
+
+        Quaternion localRotation = unityMatrix.rotation;
+
+        Vector3 worldPos = captureCameraPosition + (captureCameraRotation * localPosition);
+        Quaternion worldRot = captureCameraRotation * localRotation;
+
+        targetMeshAnchor.position = worldPos;
+        targetMeshAnchor.rotation = worldRot;
+
+        Debug.Log($"✅ 렌더링 업데이트 완료! 최종 월드 위치: {targetMeshAnchor.position}");
+    }
+}
+
+public class RegistrationResponse
+{
+    public string status;
+    public string patient_id;
+    public string unit;
+    public float[][] matrix;
+    public float[][] source_from_target_mm;
+    public float[][] source_from_target_m;
+    public float[][] hololens_from_target_m;
+}

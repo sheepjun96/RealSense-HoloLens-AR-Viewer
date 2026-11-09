@@ -1,0 +1,251 @@
+using System;
+using System.Collections;
+using System.Collections.Generic;
+using System.IO;
+using Dummiesman;
+using Newtonsoft.Json;
+using UnityEngine;
+using UnityEngine.Networking;
+
+public class PatientModelLoader : MonoBehaviour
+{
+    [Header("Server")]
+    public string baseUrl = "http://172.20.10.2:55555";
+    public float pollingInterval = 3f;
+
+    [Header("PatientAnchor children")]
+    public MeshFilter skinMeshFilter;
+    public MeshFilter tumorMeshFilter;
+    public GameObject tumorGameObject;
+
+    private string currentPatient;
+    private Mesh runtimeSkinMesh;
+    private Mesh runtimeTumorMesh;
+
+    public string CurrentPatientId { get { return currentPatient; } }
+
+    [Serializable]
+    private class PatientInfo
+    {
+        public string patient_id;
+        public string skin_url;
+        public string tumor_url;
+    }
+
+    [Serializable]
+    private class CurrentPatientResponse
+    {
+        public string active_patient;
+        public PatientInfo patient;
+    }
+
+    private void Start()
+    {
+        if (skinMeshFilter == null || tumorMeshFilter == null || tumorGameObject == null)
+        {
+            Debug.LogError("PatientModelLoader: MeshFilter 및 tumorGameObject 연결이 필요합니다.");
+            enabled = false;
+            return;
+        }
+
+        StartCoroutine(PollPatientStatus());
+    }
+
+    private IEnumerator PollPatientStatus()
+    {
+        while (true)
+        {
+            using (UnityWebRequest request = UnityWebRequest.Get(Url("/api/patient/current")))
+            {
+                yield return request.SendWebRequest();
+                if (RequestFailed(request))
+                {
+                    Debug.LogWarning("환자 조회 실패: " + request.error);
+                }
+                else
+                {
+                    CurrentPatientResponse response = ParseCurrent(request.downloadHandler.text);
+                    if (response != null && response.patient != null &&
+                        response.active_patient == response.patient.patient_id &&
+                        response.active_patient != currentPatient)
+                    {
+                        yield return DownloadAndApplyModels(response.patient);
+                    }
+                }
+            }
+
+            yield return new WaitForSeconds(Mathf.Max(1f, pollingInterval));
+        }
+    }
+
+    private IEnumerator DownloadAndApplyModels(PatientInfo patient)
+    {
+        if (string.IsNullOrEmpty(patient.skin_url))
+        {
+            Debug.LogError("환자 " + patient.patient_id + "의 skin_url이 없습니다.");
+            yield break;
+        }
+
+        Mesh newSkin = null;
+        Mesh newTumor = null;
+
+        using (UnityWebRequest skinRequest = UnityWebRequest.Get(Url(patient.skin_url)))
+        {
+            yield return skinRequest.SendWebRequest();
+            if (RequestFailed(skinRequest))
+            {
+                Debug.LogError("피부 OBJ 다운로드 실패: " + skinRequest.error);
+                yield break;
+            }
+
+            newSkin = ParseObjMesh(skinRequest.downloadHandler.data, "skin");
+        }
+
+        if (newSkin == null) yield break;
+
+        if (!string.IsNullOrEmpty(patient.tumor_url))
+        {
+            using (UnityWebRequest tumorRequest = UnityWebRequest.Get(Url(patient.tumor_url)))
+            {
+                yield return tumorRequest.SendWebRequest();
+                if (RequestFailed(tumorRequest))
+                {
+                    Debug.LogError("병변 OBJ 다운로드 실패: " + tumorRequest.error);
+                    Destroy(newSkin);
+                    yield break;
+                }
+
+                newTumor = ParseObjMesh(tumorRequest.downloadHandler.data, "tumor");
+            }
+
+            if (newTumor == null)
+            {
+                Destroy(newSkin);
+                yield break;
+            }
+        }
+
+        // 다운로드 도중 웹 UI에서 환자가 다시 바뀌었으면 오래된 모델은 적용하지 않습니다.
+        using (UnityWebRequest checkRequest = UnityWebRequest.Get(Url("/api/patient/current")))
+        {
+            yield return checkRequest.SendWebRequest();
+            CurrentPatientResponse latest = RequestFailed(checkRequest)
+                ? null : ParseCurrent(checkRequest.downloadHandler.text);
+            if (latest == null || latest.active_patient != patient.patient_id)
+            {
+                Destroy(newSkin);
+                if (newTumor != null) Destroy(newTumor);
+                yield break;
+            }
+        }
+
+        Mesh oldSkin = runtimeSkinMesh;
+        Mesh oldTumor = runtimeTumorMesh;
+        skinMeshFilter.sharedMesh = newSkin;
+        tumorMeshFilter.sharedMesh = newTumor;
+        tumorGameObject.SetActive(newTumor != null);
+        runtimeSkinMesh = newSkin;
+        runtimeTumorMesh = newTumor;
+        currentPatient = patient.patient_id;
+
+        if (oldSkin != null) Destroy(oldSkin);
+        if (oldTumor != null) Destroy(oldTumor);
+        Debug.Log("환자 모델 적용 완료: " + currentPatient);
+    }
+
+    private Mesh ParseObjMesh(byte[] bytes, string name)
+    {
+        GameObject imported = null;
+        Mesh mesh = null;
+        bool keepMesh = false;
+
+        try
+        {
+            using (MemoryStream stream = new MemoryStream(bytes, false))
+            {
+                imported = new OBJLoader().Load(stream);
+            }
+
+            imported.SetActive(false);
+            MeshFilter[] filters = imported.GetComponentsInChildren<MeshFilter>(true);
+            if (filters.Length != 1 || filters[0].sharedMesh == null)
+                throw new InvalidOperationException("OBJ에는 메쉬가 정확히 하나 있어야 합니다.");
+
+            mesh = filters[0].sharedMesh;
+            // skin/tumor 부모의 0.001 Scale이 mm -> m 변환을 담당합니다.
+            // 여기서는 Dummiesman 로더 부모의 X축 반전만 정점에 반영합니다.
+            Vector3 scale = imported.transform.localScale;
+            Vector3[] vertices = mesh.vertices;
+            for (int i = 0; i < vertices.Length; i++)
+                vertices[i] = Vector3.Scale(vertices[i], scale);
+            mesh.vertices = vertices;
+
+            if (scale.x * scale.y * scale.z < 0f)
+            {
+                for (int submesh = 0; submesh < mesh.subMeshCount; submesh++)
+                {
+                    int[] triangles = mesh.GetTriangles(submesh);
+                    for (int i = 0; i < triangles.Length; i += 3)
+                    {
+                        int temp = triangles[i + 1];
+                        triangles[i + 1] = triangles[i + 2];
+                        triangles[i + 2] = temp;
+                    }
+                    mesh.SetTriangles(triangles, submesh);
+                }
+            }
+
+            mesh.RecalculateNormals();
+            mesh.RecalculateBounds();
+            mesh.name = "Downloaded " + name;
+            filters[0].sharedMesh = null;
+            keepMesh = true;
+            return mesh;
+        }
+        catch (Exception error)
+        {
+            Debug.LogError("OBJ 해석 실패 (" + name + "): " + error);
+            return null;
+        }
+        finally
+        {
+            if (imported != null)
+            {
+                HashSet<Material> materials = new HashSet<Material>();
+                foreach (Renderer renderer in imported.GetComponentsInChildren<Renderer>(true))
+                    foreach (Material material in renderer.sharedMaterials)
+                        if (material != null) materials.Add(material);
+                foreach (Material material in materials) Destroy(material);
+                Destroy(imported);
+            }
+
+            if (!keepMesh && mesh != null) Destroy(mesh);
+        }
+    }
+
+    private static CurrentPatientResponse ParseCurrent(string json)
+    {
+        try { return JsonConvert.DeserializeObject<CurrentPatientResponse>(json); }
+        catch (Exception error)
+        {
+            Debug.LogError("환자 JSON 파싱 실패: " + error.Message);
+            return null;
+        }
+    }
+
+    private string Url(string path)
+    {
+        return baseUrl.TrimEnd('/') + (path.StartsWith("/") ? path : "/" + path);
+    }
+
+    private static bool RequestFailed(UnityWebRequest request)
+    {
+        return request.isNetworkError || request.isHttpError;
+    }
+
+    private void OnDestroy()
+    {
+        if (runtimeSkinMesh != null) Destroy(runtimeSkinMesh);
+        if (runtimeTumorMesh != null) Destroy(runtimeTumorMesh);
+    }
+}

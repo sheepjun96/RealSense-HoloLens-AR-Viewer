@@ -1,0 +1,13 @@
+[Licensing::Module] Successfully connected to LicensingClient on channel: LicenseClient-yangjm
+Entitlement-based licensing initiated
+[LicensingClient] Licenses Updated successfully in LicensingClient
+BatchMode: Unity has not been activated with a valid License. Could be a new activation or renewal... 
+(Filename: C:\build\output\unity\unity\Platforms/Windows/Modules/LicensingLegacy/WinILicensingAdapter.cpp Line: 51)
+
+DisplayProgressbar: Unity license
+[UnityConnectServicesConfig] config is NOT valid, switching to default
+Cancelling DisplayDialog: Failed to activate/update license Missing or bad username or password. Please try again using valid credentials or contact support@unity3d.com
+This should not be called in batch mode. 
+(Filename: C:\build\output\unity\unity\Editor/Platform/Windows/EditorUtility.cpp Line: 1120)
+
+Exiting without the bug reporter. Application will terminate with return code 1
